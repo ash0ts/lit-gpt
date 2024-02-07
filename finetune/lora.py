@@ -66,6 +66,7 @@ def setup(
     out_dir: Path = Path("out/lora/alpaca"),
     precision: Optional[str] = None,
     quantize: Optional[Literal["bnb.nf4", "bnb.nf4-dq", "bnb.fp4", "bnb.fp4-dq", "bnb.int8-training"]] = None,
+    log_to_wandb: bool = True,
 ) -> None:
     precision = precision or get_default_supported_precision(training=True)
 
@@ -93,9 +94,13 @@ def setup(
     else:
         strategy = "auto"
 
-    logger = CSVLogger(out_dir.parent, out_dir.name, flush_logs_every_n_steps=log_interval)
-    fabric = L.Fabric(devices=devices, strategy=strategy, precision=precision, loggers=logger, plugins=plugins)
+    loggers = [CSVLogger(out_dir.parent, out_dir.name, flush_logs_every_n_steps=log_interval)]
+    if log_to_wandb:
+        from wandb.integration.lightning.fabric import WandbLogger
+        loggers.append(WandbLogger(project="lit-gpt-llm-lora-finetuning"))
+    fabric = L.Fabric(devices=devices, strategy=strategy, precision=precision, loggers=loggers, plugins=plugins)
     fabric.print(hparams)
+    fabric.log_hyperparams(hparams)
     fabric.launch(main, data_dir, checkpoint_dir, out_dir)
 
 
@@ -132,7 +137,12 @@ def main(fabric: L.Fabric, data_dir: Path, checkpoint_dir: Path, out_dir: Path) 
 
     fabric.print(f"Number of trainable parameters: {num_parameters(model, requires_grad=True):,}")
     fabric.print(f"Number of non trainable parameters: {num_parameters(model, requires_grad=False):,}")
-
+    fabric.log_dict(
+        {
+            "num_trainable_params": num_parameters(model, requires_grad=True),
+            "non_trainable_params": num_parameters(model, requires_grad=False)
+        }
+    )
     model = fabric.setup_module(model)
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
@@ -153,8 +163,10 @@ def main(fabric: L.Fabric, data_dir: Path, checkpoint_dir: Path, out_dir: Path) 
     train_time = time.perf_counter()
     train(fabric, model, optimizer, scheduler, train_data, val_data, checkpoint_dir, out_dir)
     fabric.print(f"Training time: {(time.perf_counter()-train_time):.2f}s")
+    fabric.log_dict({"training_time": time.perf_counter()-train_time})
     if fabric.device.type == "cuda":
         fabric.print(f"Memory used: {torch.cuda.max_memory_allocated() / 1e9:.02f} GB")
+        fabric.log_dict({"memory_used": torch.cuda.max_memory_allocated() / 1e9})
 
     # Save the final LoRA checkpoint at the end of training
     save_path = out_dir / "lit_model_lora_finetuned.pth"
@@ -217,14 +229,26 @@ def train(
                 f"iter {iter_num} step {step_count}: loss {loss_item:.4f}, iter time:"
                 f" {(t1 - iter_t0) * 1000:.2f}ms{' (optimizer.step)' if not is_accumulating else ''}"
             )
+            fabric.log_dict(
+                {"iter": iter_num,
+                "step": step_count,
+                "loss": loss.item(),
+                "iter time (ms)": (t1 - iter_t0) * 1000,}
+            )
 
         if not is_accumulating and step_count % eval_interval == 0:
             t0 = time.perf_counter()
             val_loss = validate(fabric, model, val_data, tokenizer, max_iters=eval_iters)
             t1 = time.perf_counter() - t0
             fabric.print(f"step {iter_num}: val loss {val_loss.item():.4f}, val time: {t1 * 1000:.2f}ms")
+            fabric.log_dict(
+                {"val_iter": iter_num,
+                "val_loss": val_loss,
+                "val_time (ms)": t1 * 1000,}
+            )
             fabric.barrier()
         if not is_accumulating and step_count % save_interval == 0:
+            fabric.print("Saving Lora checkpoint")
             checkpoint_path = out_dir / f"iter-{iter_num:06d}-ckpt.pth"
             save_lora_checkpoint(fabric, model, checkpoint_path)
 
