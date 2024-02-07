@@ -144,6 +144,7 @@ def run_eval_harness(
     limit: Optional[int] = None,
     bootstrap_iters: int = 100000,
     no_cache: bool = True,
+    log_to_wandb: bool = True,
 ):
     if precision is None:
         precision = get_default_supported_precision(training=False)
@@ -184,6 +185,36 @@ def run_eval_harness(
         data = json.dumps(results)
         with open(save_filepath, "w") as fw:
             fw.write(data)
+    if log_to_wandb:
+        config = results["config"]
+        config.update(
+            dict(
+                checkpoint_dir = checkpoint_dir,
+                precision = precision,
+                batch_size = eval_harness.batch_size,
+                eval_tasks = eval_tasks,
+                num_fewshot = num_fewshot,
+                bootstrap_iters = bootstrap_iters,
+                device = eval_harness.device,
+                strategy = fabric.strategy,
+                quantize = quantize,
+                save_filepath = save_filepath,
+                limit = limit,
+                no_cache = no_cache
+            )
+        )
+        run = wandb.init(
+            project="lit-gpt-llm-lora-finetuning",
+            job_type="eval-harness",
+            config=config,
+        )
+
+        results_tmp = results["results"]
+        tasks = list(results_tmp.keys())
+
+        for task in tasks:
+            wandb.log({f"{task}/{k}": v for k, v in results_tmp[task].items()}, commit=False)
+        wandb.log({})
 
 
 if __name__ == "__main__":
