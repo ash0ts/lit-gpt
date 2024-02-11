@@ -97,10 +97,11 @@ def setup(
     loggers = [CSVLogger(out_dir.parent, out_dir.name, flush_logs_every_n_steps=log_interval)]
     if log_to_wandb:
         from wandb.integration.lightning.fabric import WandbLogger
-        loggers.append(WandbLogger(project="lit-gpt-llm-lora-finetuning"))
+        wandb_logger = WandbLogger(project="lit-gpt-llm-lora-finetuning")
+        wandb_logger.log_hyperparams(hparams)
+        loggers.append(wandb_logger)
     fabric = L.Fabric(devices=devices, strategy=strategy, precision=precision, loggers=loggers, plugins=plugins)
     fabric.print(hparams)
-    fabric.log_hyperparams(hparams)
     fabric.launch(main, data_dir, checkpoint_dir, out_dir)
 
 
